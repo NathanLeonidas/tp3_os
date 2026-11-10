@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(make)",
+      "Bash(cd *)",
+      "Bash(make *)",
+      "Bash(})",
+      "Bash(timeout *)",
+      "Read(//tmp/tp3_run.txt/**)",
+      "Bash(stdbuf *)",
+      "Bash(grep *)",
+      "Bash(tail *)",
+      "Bash(wc *)",
+      "Read(//tmp/**)",
+      "Bash(printf *)",
+      "Bash(echo *)"
+    ]
+  },
+  "$version": 4
+}
