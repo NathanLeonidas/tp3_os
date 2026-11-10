@@ -88,7 +88,7 @@ typedef struct {
     pthread_cond_t not_full;
 } MesaMonitor;
 
-// initialiser le moniteur
+//initialiser le moniteur
 void monitor_init(MesaMonitor *m) {
     pthread_mutex_init(&m->mutex, NULL);
     pthread_cond_init(&m->not_empty, NULL);
@@ -147,7 +147,7 @@ int find_ready_slot() {
     return -1;
 }
 
-// PRODUCTEUR: AJOUTER UNE VIDEO
+// PRODUCER: AJOUTER UNE VIDEO
 int server_add_video(const char *video) {
     MesaMonitor *m = &server.monitor;
     monitor_enter(m);
