@@ -12,7 +12,6 @@
 #include <stdint.h>
 #include <time.h>
 #include <errno.h>
-#include <semaphore.h>
 
 // CONFIGURATION
 #define BUFFER_SIZE 5
@@ -28,7 +27,7 @@
 #define CMD_RESTORE 2
 #define CMD_EXIT 3
 
-// FONCTIONS FOURNIES
+// FONCTIONS FOURNIES Par l'ennonce
 static int video_id = 0;
 
 char *createVideo() {
@@ -82,86 +81,28 @@ int read_full(int fd, void *buffer, size_t size) {
     return 0;
 }
 
-// MONITEUR DE HOARE
+// MONITEUR DE MESA
 typedef struct {
-    sem_t semaphore;
-    int waiting;
-} HoareCondition;
-
-typedef struct {
-    sem_t mutex;
-    sem_t urgent;
-    int urgent_count;
-
-    HoareCondition not_empty;
-    HoareCondition not_full;
-
-} HoareMonitor;
-
-
-//attendre un semaphore
-void semaphore_wait(sem_t *s) {
-    while (sem_wait(s) == -1) {
-        if (errno != EINTR) {
-            perror("sem_wait");
-            exit(EXIT_FAILURE);
-        }
-    }
-}
-
+    pthread_mutex_t mutex;
+    pthread_cond_t not_empty;
+    pthread_cond_t not_full;
+} MesaMonitor;
 
 // initialiser le moniteur
-void monitor_init(HoareMonitor *m) {
-    sem_init(&m->mutex, 0, 1);
-    sem_init(&m->urgent, 0, 0);
-    m->urgent_count = 0;
-    sem_init(&m->not_empty.semaphore, 0, 0);
-    m->not_empty.waiting = 0;
-    sem_init(&m->not_full.semaphore, 0, 0);
-    m->not_full.waiting = 0;
+void monitor_init(MesaMonitor *m) {
+    pthread_mutex_init(&m->mutex, NULL);
+    pthread_cond_init(&m->not_empty, NULL);
+    pthread_cond_init(&m->not_full, NULL);
 }
-
 
 // entrer dans le moniteur
-void monitor_enter(HoareMonitor *m) {
-    semaphore_wait(&m->mutex);
+void monitor_enter(MesaMonitor *m) {
+    pthread_mutex_lock(&m->mutex);
 }
 
-
-// sortir du montieur
-void monitor_leave(HoareMonitor *m) {
-    if (m->urgent_count > 0)
-        sem_post(&m->urgent);
-    else
-        sem_post(&m->mutex);
-}
-
-
-// attendre une condition
-void hoare_wait(HoareMonitor *m, HoareCondition *c) {
-    c->waiting++;
-    if (m->urgent_count > 0)
-        sem_post(&m->urgent);
-    else
-        sem_post(&m->mutex);
-    semaphore_wait(&c->semaphore);
-    c->waiting--;
-}
-
-
-//signaler une condition au moniteur
-void hoare_signal(HoareMonitor *m, HoareCondition *c) {
-
-    if (c->waiting > 0) {
-
-        m->urgent_count++;
-
-        sem_post(&c->semaphore);
-
-        semaphore_wait(&m->urgent);
-
-        m->urgent_count--;
-    }
+// sortir du moniteur
+void monitor_leave(MesaMonitor *m) {
+    pthread_mutex_unlock(&m->mutex);
 }
 
 // SERVEUR PRINCIPAL
@@ -170,16 +111,13 @@ typedef struct {
     int state;
 } VideoSlot;
 
-
 typedef struct {
     VideoSlot slots[BUFFER_SIZE];
     int stopping;
-    HoareMonitor monitor;
+    MesaMonitor monitor;
 } Server;
 
-
 Server server;
-
 
 // initialisation
 void server_init() {
@@ -191,7 +129,6 @@ void server_init() {
     monitor_init(&server.monitor);
 }
 
-
 // Cherche une place qui soit libre
 int find_free_slot() {
     for (int i = 0; i < BUFFER_SIZE; i++) {
@@ -201,8 +138,7 @@ int find_free_slot() {
     return -1;
 }
 
-
-// chercher une vidéo disponible
+//chercher une video dipsonible
 int find_ready_slot() {
     for (int i = 0; i < BUFFER_SIZE; i++) {
         if (server.slots[i].state == READY)
@@ -211,13 +147,12 @@ int find_ready_slot() {
     return -1;
 }
 
-
 // PRODUCTEUR: AJOUTER UNE VIDEO
 int server_add_video(const char *video) {
-    HoareMonitor *m = &server.monitor;
+    MesaMonitor *m = &server.monitor;
     monitor_enter(m);
     while (find_free_slot() == -1 && !server.stopping) {
-        hoare_wait(m, &m->not_full);
+        pthread_cond_wait(&m->not_full, &m->mutex);
     }
     if (server.stopping) {
         monitor_leave(m);
@@ -227,18 +162,17 @@ int server_add_video(const char *video) {
     strcpy(server.slots[index].video, video);
     server.slots[index].state = READY;
     printf("[SERVER] Video ajoutee : %s\n", video);
-    hoare_signal(m, &m->not_empty);
+    pthread_cond_signal(&m->not_empty);
     monitor_leave(m);
     return 0;
 }
 
-
-// CONSOMMATEUR: RESERVER UNE VIDEO
+// CONSOMATEUR: RESERVER UNE VIDEO
 int server_get_video(char *video) {
-    HoareMonitor *m = &server.monitor;
+    MesaMonitor *m = &server.monitor;
     monitor_enter(m);
     while (find_ready_slot() == -1 && !server.stopping) {
-        hoare_wait(m, &m->not_empty);
+        pthread_cond_wait(&m->not_empty, &m->mutex);
     }
     if (server.stopping) {
         monitor_leave(m);
@@ -254,40 +188,28 @@ int server_get_video(char *video) {
     return index;
 }
 
-
 // SECTION 2: VALIDATION DE LA DIFFUSION
 void server_commit_video(int index) {
-    HoareMonitor *m = &server.monitor;
+    MesaMonitor *m = &server.monitor;
     monitor_enter(m);
     if (!breakdown_flag && !server.stopping) {
         server.slots[index].state = FREE;
         server.slots[index].video[0] = '\0';
-        printf("[SERVER] Video validee et supprimee.\n");
-        hoare_signal(m, &m->not_full);
+        printf("[SERVER] Video validee et supprimee\n");
+        pthread_cond_signal(&m->not_full);
     }
     monitor_leave(m);
 }
 
-
-// ARRET DU SERVEUR
+//ARRET DU SERVEUR
 void server_stop() {
-    HoareMonitor *m = &server.monitor;
+    MesaMonitor *m = &server.monitor;
     monitor_enter(m);
     server.stopping = 1;
-
-    // Wake up tout les producteurs bloques sans utiliser hoare_signal
-    // (sinon cela causerait un deadlock en bloquant sur la semaphore 'urgent')
-    for (int i = 0; i < m->not_full.waiting; i++) {
-        sem_post(&m->not_full.semaphore);
-    }
-
-    // Reveiller tous les consommateurs bloques
-    for (int i = 0; i < m->not_empty.waiting; i++) {
-        sem_post(&m->not_empty.semaphore);
-    }
+    pthread_cond_broadcast(&m->not_full);
+    pthread_cond_broadcast(&m->not_empty);
     monitor_leave(m);
 }
-
 
 // CAMERAS
 pthread_mutex_t generation_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -298,7 +220,6 @@ char *safe_create_video() {
     pthread_mutex_unlock(&generation_mutex);
     return video;
 }
-
 
 void *camera_thread(void *arg) {
     int id = *(int *)arg;
@@ -315,7 +236,6 @@ void *camera_thread(void *arg) {
     return NULL;
 }
 
-
 // ECRANS
 void *screen_thread(void *arg) {
     int id = *(int *)arg;
@@ -326,8 +246,6 @@ void *screen_thread(void *arg) {
             break;
 
         // VERIFIER LA PANNE AVANT DE COMMENCER LA DIFFUSION
-        // Si on est arrete ici, la video est reservee (avec IN_USE) mais pas diffusee.
-        // On ne fait pas de commit, elle sera restauree en READY pour un autre ecran.
         if (breakdown_flag) {
             printf("[SCREEN %d] Panne detectee avant diffusion de %s. Video conservee pour reprise.\n", id, video);
             break; 
@@ -339,8 +257,6 @@ void *screen_thread(void *arg) {
         usleep(1500000);
 
         // VERIFIER LA PANNE APRES DIFFUSION
-        // Si une panne est survenue pendant le usleep, la diffusion est finie
-	// On la valide et aucune camera ne la lirai en double
         if (breakdown_flag) {
             printf("[SCREEN %d] Panne survenue pendant la diffusion de %s.\n", id, video);
             server_commit_video(index);
@@ -361,14 +277,13 @@ typedef struct {
     VideoSlot slots[BUFFER_SIZE];
 } ServerSnapshot;
 
-
 // Faire une copie coherente du serveur
+//On fait le choix que si une video est interromue pendant sa lecture elle est consideree comme lue
 void server_snapshot(ServerSnapshot *snapshot) {
-    HoareMonitor *m = &server.monitor;
+    MesaMonitor *m = &server.monitor;
     monitor_enter(m);
     for (int i = 0; i < BUFFER_SIZE; i++) {
         snapshot->slots[i] = server.slots[i];
-        // Toute video interrompue redevient disponible pour etre consommee
         if (snapshot->slots[i].state == IN_USE) {
             snapshot->slots[i].state = READY;
         }
@@ -376,10 +291,9 @@ void server_snapshot(ServerSnapshot *snapshot) {
     monitor_leave(m);
 }
 
-
 // Restaurer le serveur principal
 void server_restore(ServerSnapshot *snapshot) {
-    HoareMonitor *m = &server.monitor;
+    MesaMonitor *m = &server.monitor;
     monitor_enter(m);
     for (int i = 0; i < BUFFER_SIZE; i++) {
         server.slots[i] = snapshot->slots[i];
@@ -392,7 +306,6 @@ void server_restore(ServerSnapshot *snapshot) {
     printf("[SERVER] Restauration terminee.\n");
 }
 
-
 // SERVEUR SECONDAIRE
 void backup_server(int socket_fd) {
     ServerSnapshot backup;
@@ -402,26 +315,22 @@ void backup_server(int socket_fd) {
         if (read_full(socket_fd, &command, sizeof(command)) == -1)
             break;
 
-        // Recoit la backup
         if (command == CMD_BACKUP) {
             printf("[BACKUP] Reception des donnees...\n");
             if (read_full(socket_fd, &backup, sizeof(backup)) == -1)
                 break;
-            printf("[BACKUP] Copie terminee.\n");
+            printf("[BACKUP] Copie terminee\n");
             
-	    // Confirmation 
             int ack = 1;
             if (write_full(socket_fd, &ack, sizeof(ack)) == -1)
                 break;
             printf("[BACKUP] Confirmation ACK envoyee.\n");
         }
-
-        // Envoyer la backup au serveur principale
         else if (command == CMD_RESTORE) {
             printf("[BACKUP] Envoi des donnees au serveur principal.\n");
             if (write_full(socket_fd, &backup, sizeof(backup)) == -1)
                 break;
-            printf("[BACKUP] Restauration transmise.\n");
+            printf("[BACKUP] backup retransmise\n");
         }
         else if (command == CMD_EXIT) {
             printf("[BACKUP] Arret du serveur secondaire.\n");
@@ -432,11 +341,9 @@ void backup_server(int socket_fd) {
     exit(EXIT_SUCCESS);
 }
 
-
-// COMMUNICATION AVEC LE SERVEUR SECONDAIRE
+// COMUNICATION AVEC LE SERVEUR SECONDAIRE
 int backup_socket;
 
-// Envoyer les donnees
 int send_backup() {
     ServerSnapshot snapshot;
     server_snapshot(&snapshot);
@@ -455,8 +362,6 @@ int send_backup() {
     return -1;
 }
 
-
-// Recevoir les donnees
 int receive_backup() {
     int command = CMD_RESTORE;
     ServerSnapshot snapshot;
@@ -467,7 +372,6 @@ int receive_backup() {
     server_restore(&snapshot);
     return 0;
 }
-
 
 // GESTION DES THREADS
 pthread_t cameras[N_CAMERAS];
@@ -480,24 +384,13 @@ void start_threads() {
     printf("\n========== DEMARRAGE DES THREADS ==========\n");
     for (int i = 0; i < N_CAMERAS; i++) {
         camera_ids[i] = i + 1;
-        pthread_create(
-            &cameras[i],
-            NULL,
-            camera_thread,
-            &camera_ids[i]
-        );
+        pthread_create(&cameras[i], NULL, camera_thread, &camera_ids[i]);
     }
     for (int i = 0; i < N_SCREENS; i++) {
         screen_ids[i] = i + 1;
-        pthread_create(
-            &screens[i],
-            NULL,
-            screen_thread,
-            &screen_ids[i]
-        );
+        pthread_create(&screens[i], NULL, screen_thread, &screen_ids[i]);
     }
 }
-
 
 void join_threads() {
     for (int i = 0; i < N_CAMERAS; i++) {
@@ -508,7 +401,6 @@ void join_threads() {
     }
     printf("[MAIN] Tous les threads sont arretes.\n");
 }
-
 
 // MAIN
 int main(int argc, char *argv[]) {
@@ -525,7 +417,7 @@ int main(int argc, char *argv[]) {
     // Panne après un délai aléatoire entre 5 et 15 secondes.
     alarm(rand() % 11 + 5);
 
-    //Initialisation des serveur
+    // Initialisation des serveurs
     server_init();
     int sockets[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == -1) {
@@ -548,7 +440,7 @@ int main(int argc, char *argv[]) {
 
     // FONCTIONNEMENT NORMAL
     start_threads();
-    printf("\n[MAIN] Systeme de videosurveillance actif.\n");
+    printf("\n[MAIN] Systeme de video surveillance actif.\n");
     while (!breakdown_flag) {
         usleep(100000);
     }
@@ -559,7 +451,7 @@ int main(int argc, char *argv[]) {
     printf("       PANNE DU SERVEUR PRINCIPAL\n");
     printf("============================================\n");
 
-    // Arreter les threads, et sauvegarde
+    // Arreter les threads et faire une backup
     server_stop();
     join_threads();
     alarm(0);
@@ -604,4 +496,3 @@ int main(int argc, char *argv[]) {
     printf("============================================\n");
     return EXIT_SUCCESS;
 }
-
